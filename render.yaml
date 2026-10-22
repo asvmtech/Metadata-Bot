@@ -1,9 +1,13 @@
+# render.yaml
+# IMPORTANT: Create this service as a Background Worker, NOT a Web Service.
+# Render Dashboard → New → Background Worker → Connect your GitHub repository.
+
 services:
   - type: worker
     name: video-metadata-editor-bot
-    runtime: python
-    buildCommand: apt-get update && apt-get install -y ffmpeg && pip install -r requirements.txt
-    startCommand: python main.py
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
     autoDeploy: true
     envVars:
       - key: BOT_TOKEN
