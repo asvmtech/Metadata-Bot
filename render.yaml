@@ -1,14 +1,12 @@
-# render.yaml
-# IMPORTANT: Create this service as a Background Worker, NOT a Web Service.
-# Render Dashboard → New → Background Worker → Connect your GitHub repository.
-
 services:
-  - type: worker
+  - type: web
     name: video-metadata-editor-bot
     runtime: docker
     dockerfilePath: ./Dockerfile
     dockerContext: .
+    plan: free
     autoDeploy: true
+    healthCheckPath: /
     envVars:
       - key: BOT_TOKEN
         sync: false
