@@ -1,0 +1,18 @@
+services:
+  - type: worker
+    name: video-metadata-editor-bot
+    runtime: python
+    buildCommand: apt-get update && apt-get install -y ffmpeg && pip install -r requirements.txt
+    startCommand: python main.py
+    autoDeploy: true
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: MAX_FILE_MB
+        value: "1800"
