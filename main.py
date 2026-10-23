@@ -12,7 +12,7 @@ BOT_TOKEN = os.getenv('BOT_TOKEN', '8958744545:AAFz-pS6HpaMDgZ4FppsyimCuSsgde0Ho
 API_ID = os.getenv('API_ID', '32541562').strip()
 API_HASH = os.getenv('API_HASH', 'e37e4432298d5a5eb4a6e32c18804283').strip()
 DATABASE_URL = os.getenv('DATABASE_URL', 'mongodb+srv://asvm:incorrectasvm@cluster0.v2z8vnw.mongodb.net/?appName=Cluster0').strip()
-MAX_FILE_MB = int(os.getenv('MAX_FILE_MB', '1800'))
+MAX_FILE_MB = int(os.getenv("MAX_FILE_MB", "4096"))
 WORK_DIR = Path(os.getenv("WORK_DIR", "/tmp/video_metadata_bot"))
 PORT = int(os.getenv("PORT", "10000"))
 
@@ -50,7 +50,7 @@ LANGUAGES = [
     ("Undetermined", "und")
 ]
 LANGUAGE_NAMES = dict(LANGUAGES)
-FILE_TAGS = {"title", "artist", "album", "date", "year", "genre", "comment", "description", "copyright", "encoder"}
+FILE_TAGS = {"title", "artist", "album", "date", "year", "genre", "comment", "description", "copyright", "encoder", "composer", "performer", "publisher", "language", "synopsis", "show", "season_number", "episode_id", "network", "creation_time"}
 
 def buttons(rows):
     return InlineKeyboardMarkup([[InlineKeyboardButton(t, callback_data=d) for t, d in row] for row in rows])
@@ -153,8 +153,10 @@ def menu():
         [("🌐 Audio language", "edit_audio_lang"), ("💬 Subtitle language", "edit_sub_lang")],
         [("🎧 Audio title", "edit_audio_title"), ("💬 Subtitle title", "edit_sub_title")],
         [("🎞 Video title", "edit_video_title"), ("📝 File title", "edit_file_title")],
-        [("🧾 Other tags", "other_tags"), ("✏️ Rename output", "rename")],
-        [("👁 Preview", "preview"), ("✅ Apply & send", "apply")],
+        [("🧾 More metadata", "other_tags"), ("✏️ Rename output", "rename")],
+        [("🖼️ Thumbnail", "thumbnail"), ("📎 Attachment", "attachment")],
+        [("🎬 Add 10s intro", "intro"), ("👁 Preview", "preview")],
+        [("✅ Apply & send", "apply")],
         [("💾 Save defaults", "save"), ("❌ Cancel", "cancel")]
     ])
 
@@ -215,6 +217,11 @@ async def cleanup_cmd(_, m: Message):
 
 @app.on_message((filters.video | filters.document) & filters.private)
 async def receive_video(_, m: Message):
+    # Extra media (thumbnail, attachment, intro) belongs to the active session,
+    # not to a new main-video upload.
+    active = sessions.get(m.from_user.id) if m.from_user else None
+    if active and active.get("awaiting_media"):
+        return
     media = m.video or m.document
     if not media:
         return
@@ -251,7 +258,8 @@ async def receive_video(_, m: Message):
             await safe_edit(status, "🔎 Reading file metadata…")
             info = await asyncio.to_thread(probe, src)
             sessions[uid] = {"src": str(src), "name": src.name, "cfg": load_settings(uid),
-                             "paths": [str(src)], "info": info, "prompt": None}
+                             "paths": [str(src)], "info": info, "prompt": None,
+                             "thumbnail": None, "attachment": None, "intro": None}
             await safe_edit(status, f"✅ **Loaded:** `{src.name}`\n\n{summary(info)}\n\nChoose what to edit:", menu())
         except Exception as e:
             log.exception("Download/probe failed")
@@ -274,9 +282,9 @@ async def callbacks(_, c):
     if not s:
         return await c.answer("Send a video first.", show_alert=True)
     if data == "edit_audio_lang":
-        await c.message.reply_text("Choose audio language:", reply_markup=language_menu("audio"))
+        await safe_edit(c.message, "Choose audio language:", reply_markup=language_menu("audio"))
     elif data == "edit_sub_lang":
-        await c.message.reply_text("Choose subtitle language:", reply_markup=language_menu("sub"))
+        await safe_edit(c.message, "Choose subtitle language:", reply_markup=language_menu("sub"))
     elif data.startswith("set_audio_lang:"):
         s["cfg"]["audio_lang"] = data.split(":",1)[1]
         await c.message.reply_text("Audio language set to " + lang_name(s["cfg"]["audio_lang"]), reply_markup=menu())
@@ -299,11 +307,20 @@ async def callbacks(_, c):
         await ask_text(c, "other_tags", "Send tags: artist=Name|album=Movie|year=2026|genre=Drama|comment=Test."); return
     elif data == "rename":
         await ask_text(c, "rename", "Send output filename including extension, e.g. Movie (2026).mkv."); return
+    elif data == "thumbnail":
+        s["awaiting_media"] = "thumbnail"
+        await safe_edit(c.message, "🖼️ Send the photo/image to use as the Telegram upload thumbnail. This sets the Telegram preview thumbnail; it does not guarantee VLC embedded-cover support for every container.", reply_markup=buttons([[("⬅️ Menu", "menu")]]))
+    elif data == "attachment":
+        s["awaiting_media"] = "attachment"
+        await safe_edit(c.message, "📎 Send a document to attach with the final video. It will be sent alongside the edited video.", reply_markup=buttons([[("⬅️ Menu", "menu")]]))
+    elif data == "intro":
+        s["awaiting_media"] = "intro"
+        await safe_edit(c.message, "🎬 Send a video clip of about 10 seconds. It will be joined before the main video. For smooth playback, FFmpeg may need to re-encode the intro and main video; this takes longer and uses extra temporary disk space.", reply_markup=buttons([[("⬅️ Menu", "menu")]]))
     elif data == "preview":
         cfg = s["cfg"]
-        await c.message.reply_text("**Pending changes**\n" + ("\n".join(f"• `{k}` = `{v}`" for k,v in cfg.items()) if cfg else "No changes selected."), reply_markup=menu())
+        await safe_edit(c.message, "**Pending changes**\n" + ("\n".join(f"• `{k}` = `{v}`" for k,v in cfg.items()) if cfg else "No changes selected."), reply_markup=menu())
     elif data == "menu":
-        await c.message.reply_text("Choose what to edit:", reply_markup=menu())
+        await safe_edit(c.message, "Choose what to edit:", reply_markup=menu())
     elif data == "save":
         save_settings(uid, s["cfg"])
         await c.message.reply_text("💾 Defaults saved to MongoDB.")
@@ -315,6 +332,47 @@ async def callbacks(_, c):
         await apply_and_send(c.message, uid)
         return
     await c.answer()
+
+
+@app.on_message((filters.photo | filters.video | filters.document) & filters.private)
+async def receive_extra_media(_, m: Message):
+    uid = m.from_user.id
+    s = sessions.get(uid)
+    if not s or not s.get("awaiting_media"):
+        return
+    kind = s.pop("awaiting_media")
+    d = WORK_DIR / str(uid)
+    d.mkdir(parents=True, exist_ok=True)
+    status = await m.reply_text(f"⬇️ Downloading {kind}…")
+    try:
+        if kind == "thumbnail":
+            media = m.photo or m.document
+            if not media:
+                return await safe_edit(status, "Please send an image/photo.")
+            ext = ".jpg"
+            target = d / f"thumbnail_{uid}.jpg"
+        elif kind == "intro":
+            media = m.video or (m.document if getattr(m.document, "mime_type", "").startswith("video/") else None)
+            if not media:
+                s["awaiting_media"] = "intro"
+                return await safe_edit(status, "Please send a video clip for the intro.")
+            target = d / f"intro_{uid}{Path(getattr(media, 'file_name', '') or 'intro.mp4').suffix or '.mp4'}"
+        else:
+            media = m.document
+            if not media:
+                s["awaiting_media"] = "attachment"
+                return await safe_edit(status, "Please send the attachment as a document.")
+            target = d / safe_filename(getattr(media, "file_name", None) or f"attachment_{uid}")
+        downloaded = await app.download_media(m, file_name=str(target))
+        if not downloaded:
+            raise RuntimeError("Telegram did not return a file path.")
+        path = Path(downloaded)
+        s["paths"].append(str(path))
+        s[kind] = str(path)
+        await safe_edit(status, f"✅ {kind.title()} saved: `{path.name}`", reply_markup=menu())
+    except Exception as e:
+        log.exception("Extra media download failed")
+        await safe_edit(status, f"❌ Could not save {kind}: `{str(e)[-500:]}`", reply_markup=menu())
 
 @app.on_message(filters.private & filters.text & ~filters.command(["start","help","settings","cancel","cleanup","skip"]))
 async def text_input(_, m: Message):
@@ -353,11 +411,40 @@ async def skip_cmd(_, m: Message):
     if s: s["prompt"] = None
     await m.reply_text("Skipped.", reply_markup=menu() if s else None)
 
+
+def join_intro(intro, main_video, output, progress_callback=None):
+    """Prepend intro to main video. Re-encodes both to compatible H.264/AAC for reliable concatenation."""
+    # Create normalized temporary files then concat; paths are kept beside the source for cleanup.
+    base = output.parent
+    part1 = base / "intro_normalized.mp4"
+    part2 = base / "main_normalized.mp4"
+    concat_list = base / "concat_list.txt"
+    try:
+        for idx, (input_path, part) in enumerate(((intro, part1), (main_video, part2))):
+            run_cmd([
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(input_path),
+                "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,fps=30,format=yuv420p",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2",
+                "-movflags", "+faststart", str(part)
+            ])
+        concat_list.write_text(f"file '{part1.as_posix()}'\\nfile '{part2.as_posix()}'\\n", encoding="utf-8")
+        run_cmd(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0",
+                 "-i", str(concat_list), "-c", "copy", "-movflags", "+faststart", str(output)])
+        return output
+    finally:
+        for p in (part1, part2, concat_list):
+            try: p.unlink(missing_ok=True)
+            except OSError: pass
+
+
 def ffmpeg_edit(src, dst, cfg, callback):
     info = probe(src)
     args = ["ffmpeg","-hide_banner","-y","-i",str(src),"-map","0","-map_metadata","0","-c","copy",
             "-progress","pipe:1","-nostats","-loglevel","error"]
-    for key in ("title","comment","description","artist","album","date","genre","copyright","encoder"):
+    for key in ("title","comment","description","artist","album","date","genre","copyright","encoder",
+                "composer","performer","publisher","language","synopsis","show","season_number",
+                "episode_id","network","creation_time"):
         value = str(cfg.get("file_"+key,"")).strip()
         if value: args += ["-metadata",f"{key}={value}"]
     counters = {"audio":0,"subtitle":0,"video":0}
@@ -433,7 +520,15 @@ async def apply_and_send(message, uid):
                 loop
             )
         try:
-            info=await asyncio.to_thread(ffmpeg_edit,src,dst,s["cfg"],proc_progress)
+            source_for_edit = src
+            joined = None
+            if s.get("intro") and Path(s["intro"]).exists():
+                joined = src.parent / ("intro_joined_" + safe_filename(src.stem) + ".mp4")
+                await safe_edit(status, "🎬 Joining intro + main video… This re-encodes for smooth playback and may take a while.")
+                await asyncio.to_thread(join_intro, Path(s["intro"]), src, joined)
+                s["paths"].append(str(joined))
+                source_for_edit = joined
+            info=await asyncio.to_thread(ffmpeg_edit,source_for_edit,dst,s["cfg"],proc_progress)
             total=dst.stat().st_size
             up_last={"t":0.0}
             async def upload_progress(current,total_bytes):
@@ -445,8 +540,19 @@ async def apply_and_send(message, uid):
                     f"Uploaded: `{fmt_size(current)}` / `{fmt_size(total_bytes)}`\n"
                     f"Remaining: `{fmt_size(max(0,total_bytes-current))}`")
             caption="✅ **Metadata updated**\n\n"+summary(info)
-            await app.send_document(uid,document=str(dst),file_name=safe_filename(out_name),
-                                    caption=caption[:1024],progress=upload_progress)
+            thumb = s.get("thumbnail")
+            thumb_path = Path(thumb) if thumb else None
+            if thumb_path and not thumb_path.exists():
+                thumb_path = None
+            # Telegram thumbnails are only used for the upload preview; supported formats/sizes are enforced by Telegram.
+            await app.send_document(
+                uid, document=str(dst), file_name=safe_filename(out_name),
+                caption=caption[:1024], thumb=str(thumb_path) if thumb_path else None,
+                progress=upload_progress
+            )
+            attachment = s.get("attachment")
+            if attachment and Path(attachment).exists():
+                await app.send_document(uid, document=attachment, caption="📎 Attachment")
             save_settings(uid,s["cfg"])
             await safe_edit(status,"✅ **Done!** Edited video uploaded successfully.")
         except Exception as e:
