@@ -13,7 +13,6 @@ API_ID = os.getenv('API_ID', '32541562').strip()
 API_HASH = os.getenv('API_HASH', 'e37e4432298d5a5eb4a6e32c18804283').strip()
 DATABASE_URL = os.getenv('DATABASE_URL', 'mongodb+srv://asvm:incorrectasvm@cluster0.v2z8vnw.mongodb.net/?appName=Cluster0').strip()
 MAX_FILE_MB = int(os.getenv('MAX_FILE_MB', '1800'))
-
 WORK_DIR = Path(os.getenv("WORK_DIR", "/tmp/video_metadata_bot"))
 PORT = int(os.getenv("PORT", "10000"))
 
@@ -198,11 +197,21 @@ async def settings_cmd(_, m: Message):
 
 @app.on_message(filters.command(["cancel", "cleanup"]) & filters.private)
 async def cleanup_cmd(_, m: Message):
-    lock = lock_for(m.from_user.id)
+    uid = m.from_user.id
+    lock = lock_for(uid)
     if lock.locked():
         return await m.reply_text("⚠️ A task is running. Wait until it finishes before cleanup.")
-    await clear_session(m.from_user.id)
-    await m.reply_text("🧹 Temporary files cleared. Saved MongoDB settings were kept.\n\n" + storage_report())
+    await clear_session(uid)
+    try:
+        settings_col.delete_one({"_id": int(uid)})
+    except PyMongoError:
+        log.exception("Could not clear this user's MongoDB settings")
+        return await m.reply_text("⚠️ Local temporary files cleared, but MongoDB settings could not be deleted.")
+    await m.reply_text(
+        "🧹 **Cleanup complete**\\n"
+        "Temporary files and your saved settings were removed from Render storage and MongoDB.\\n\\n"
+        + storage_report()
+    )
 
 @app.on_message((filters.video | filters.document) & filters.private)
 async def receive_video(_, m: Message):
@@ -217,8 +226,11 @@ async def receive_video(_, m: Message):
         return await m.reply_text(f"File exceeds configured limit: {MAX_FILE_MB} MB.")
     uid = m.from_user.id
     lock = lock_for(uid)
-    if lock.locked():
-        return await m.reply_text("⏳ You already have a task running. Please wait.")
+    if lock.locked() or uid in sessions:
+        return await m.reply_text(
+            "⚠️ You already have a video session. Finish editing and upload it, "
+            "or use /cancel before sending another video."
+        )
     async with lock:
         status = await m.reply_text("⬇️ Preparing download…")
         d = WORK_DIR / str(uid)
@@ -296,6 +308,9 @@ async def callbacks(_, c):
         save_settings(uid, s["cfg"])
         await c.message.reply_text("💾 Defaults saved to MongoDB.")
     elif data == "apply":
+        if not s.get("cfg"):
+            await c.answer("Choose at least one metadata change first.", show_alert=True)
+            return
         await c.answer("Processing…")
         await apply_and_send(c.message, uid)
         return
@@ -368,8 +383,15 @@ def ffmpeg_edit(src, dst, cfg, callback):
         for line in proc.stdout:
             if "=" not in line: continue
             k,v=line.strip().split("=",1)
-            if k=="out_time_ms" and duration and callback:
-                callback(min(99.0,(int(v)/1_000_000)/duration*100))
+            if k == "out_time_ms" and duration and callback:
+                try:
+                    raw_time = v.strip()
+                    if raw_time and raw_time.upper() != "N/A":
+                        elapsed = int(raw_time) / 1_000_000
+                        callback(min(99.0, max(0.0, elapsed / duration * 100)))
+                except (ValueError, TypeError, OverflowError):
+                    # FFmpeg sometimes emits N/A for progress fields.
+                    pass
         err=proc.stderr.read() if proc.stderr else ""
         rc=proc.wait()
         if rc: raise RuntimeError((err or "FFmpeg failed")[-2000:])
@@ -389,6 +411,10 @@ async def apply_and_send(message, uid):
         s=sessions.get(uid)
         if not s: return await message.reply_text("Session expired.")
         src=Path(s["src"])
+        if not s.get("cfg"):
+            return await message.reply_text(
+                "⚠️ No metadata changes selected. Choose at least one edit before uploading."
+            )
         if not src.exists():
             sessions.pop(uid,None)
             return await message.reply_text("Source file is missing. Send it again.")
